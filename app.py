@@ -7,6 +7,7 @@ import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 import time
+import traceback
 from scraper.scraper import run_scraper
 
 # Page configuration
@@ -23,16 +24,49 @@ st.markdown("Track historical prices for Copper, Aluminium, Steel, and Oil")
 # Check if data exists, if not run the scraper
 data_path = "data"
 if not os.path.exists(data_path):
+    st.write("Creating data directory...")
     os.makedirs(data_path, exist_ok=True)
+    st.write("Data directory created.")
     
 if not glob.glob(os.path.join(data_path, "*.csv")):
-    with st.spinner("First run: Collecting commodity data..."):
-        run_scraper()
+    st.write("No CSV files found. Attempting to collect data...")
+    try:
+        with st.spinner("First run: Collecting commodity data..."):
+            run_scraper()
+        st.write("Initial data collection completed.")
+    except Exception as e:
+        st.error(f"Error during initial data collection: {str(e)}")
+        st.write("Error details:", traceback.format_exc())
 
-# Add a refresh button in the sidebar
+# Add a refresh button in the sidebar with detailed debugging
 if st.sidebar.button("Refresh Price Data"):
     with st.spinner("Updating commodity prices..."):
-        run_scraper()
+        try:
+            st.write("Starting data collection...")
+            # Check data directory exists and is writable
+            if not os.path.exists(data_path):
+                os.makedirs(data_path, exist_ok=True)
+                st.write(f"Created data directory at {os.path.abspath(data_path)}")
+            else:
+                st.write(f"Data directory exists at {os.path.abspath(data_path)}")
+                
+            # Check if we can write to the directory
+            try:
+                test_file = os.path.join(data_path, "test_write.txt")
+                with open(test_file, 'w') as f:
+                    f.write("test")
+                os.remove(test_file)
+                st.write("Directory is writable.")
+            except Exception as write_error:
+                st.error(f"Directory is not writable: {str(write_error)}")
+                
+            # Now run the scraper
+            run_scraper()
+            st.write("Data collection completed successfully.")
+            st.experimental_rerun()  # Rerun the app to load the new data
+        except Exception as e:
+            st.error(f"Error during data collection: {str(e)}")
+            st.write("Error details:", traceback.format_exc())
 
 # Function to load all csv files from data directory
 @st.cache_data(show_spinner=False)
@@ -40,6 +74,8 @@ def load_data():
     # Path is relative to where the app is run
     data_path = "data"
     all_files = glob.glob(os.path.join(data_path, "*.csv"))
+    
+    st.write(f"Found {len(all_files)} CSV files in data directory.")
     
     # Dictionary to store dataframes by commodity name
     commodities = {}
@@ -57,6 +93,7 @@ def load_data():
         matching_files = glob.glob(os.path.join(data_path, pattern))
         
         if matching_files:
+            st.write(f"Found {len(matching_files)} files for {commodity}: {matching_files}")
             # Skip raw data files
             matching_files = [f for f in matching_files if "_raw" not in f]
             
@@ -70,14 +107,17 @@ def load_data():
                 if daily_file:
                     df = pd.read_csv(daily_file[0], parse_dates=['Date'])
                     commodities[f"{commodity}_daily"] = df
+                    st.write(f"Loaded daily data for {commodity}")
                 
                 if weekly_file:
                     df = pd.read_csv(weekly_file[0], parse_dates=['Date'])
                     commodities[f"{commodity}_weekly"] = df
+                    st.write(f"Loaded weekly data for {commodity}")
                 
                 if monthly_file:
                     df = pd.read_csv(monthly_file[0], parse_dates=['Date'])
                     commodities[f"{commodity}_monthly"] = df
+                    st.write(f"Loaded monthly data for {commodity}")
                 
                 # Set a default for each commodity (daily preferred)
                 if daily_file:
@@ -88,6 +128,7 @@ def load_data():
                     commodities[commodity] = commodities[f"{commodity}_monthly"]
                     
             except Exception as e:
+                st.write(f"Error loading {commodity}: {str(e)}")
                 # Skip this commodity if there's an error
                 continue
     
@@ -97,8 +138,9 @@ def load_data():
         try:
             df = pd.read_csv(consolidated_file, parse_dates=['Date'])
             commodities["consolidated_weekly"] = df
-        except Exception:
-            pass
+            st.write("Loaded consolidated weekly prices")
+        except Exception as e:
+            st.write(f"Error loading consolidated data: {str(e)}")
     
     return commodities
 
