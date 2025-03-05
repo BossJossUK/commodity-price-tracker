@@ -7,6 +7,9 @@ import datetime
 import plotly.express as px
 import plotly.graph_objects as go
 import time
+import numpy as np
+from prophet import Prophet
+import traceback
 
 # Page configuration
 st.set_page_config(
@@ -18,6 +21,86 @@ st.set_page_config(
 # Title and description
 st.title("Metal & Oil Price Tracker")
 st.markdown("Track historical prices for Copper, Aluminium, Steel, and Oil")
+
+# Function to generate forecast using Prophet
+def generate_forecast(data, periods=30, commodity_name="Commodity"):
+    """
+    Generate forecast using Prophet
+    
+    Args:
+        data: DataFrame with 'Date' and 'Price' columns
+        periods: Number of days to forecast
+        commodity_name: Name of the commodity for display
+        
+    Returns:
+        Tuple of (forecast DataFrame, Prophet model)
+    """
+    # Prophet requires columns named 'ds' and 'y'
+    df_prophet = data.rename(columns={'Date': 'ds', 'Price': 'y'})
+    
+    # Create and fit the model
+    model = Prophet(
+        daily_seasonality=False,
+        weekly_seasonality=True,
+        yearly_seasonality=True,
+        seasonality_mode='multiplicative',
+        changepoint_prior_scale=0.05  # Flexibility of the trend
+    )
+    
+    # Add additional regressors if available
+    if 'Open' in data.columns and 'High' in data.columns and 'Low' in data.columns:
+        # Create lagged variables for technical indicators
+        df_prophet['price_lag1'] = df_prophet['y'].shift(1)
+        df_prophet['price_lag2'] = df_prophet['y'].shift(2)
+        df_prophet['price_lag3'] = df_prophet['y'].shift(3)
+        
+        # Drop NaN values
+        df_prophet = df_prophet.dropna()
+        
+        # Add regressors
+        model.add_regressor('price_lag1')
+        model.add_regressor('price_lag2')
+        model.add_regressor('price_lag3')
+    
+    # Fit the model
+    model.fit(df_prophet)
+    
+    # Create future dataframe
+    future = model.make_future_dataframe(periods=periods)
+    
+    # Add regressor values to future dataframe if they exist
+    if 'price_lag1' in df_prophet.columns:
+        # Get the last values for lagged variables
+        last_values = df_prophet[['y', 'price_lag1', 'price_lag2']].iloc[-1].values
+        
+        # Fill in known values
+        future.loc[future['ds'].isin(df_prophet['ds']), 'price_lag1'] = df_prophet['price_lag1'].values
+        future.loc[future['ds'].isin(df_prophet['ds']), 'price_lag2'] = df_prophet['price_lag2'].values
+        future.loc[future['ds'].isin(df_prophet['ds']), 'price_lag3'] = df_prophet['price_lag3'].values
+        
+        # For future dates, use the forecasted values (simplified approach)
+        for i in range(len(df_prophet), len(future)):
+            if i-1 >= len(df_prophet):
+                # Use previous predictions for future dates
+                future.loc[i, 'price_lag1'] = model.predict(future.iloc[[i-1]])['yhat'].values[0]
+                if i-2 >= len(df_prophet):
+                    future.loc[i, 'price_lag2'] = model.predict(future.iloc[[i-2]])['yhat'].values[0]
+                else:
+                    future.loc[i, 'price_lag2'] = df_prophet['y'].iloc[-1]
+                if i-3 >= len(df_prophet):
+                    future.loc[i, 'price_lag3'] = model.predict(future.iloc[[i-3]])['yhat'].values[0]
+                else:
+                    future.loc[i, 'price_lag3'] = df_prophet['y'].iloc[-2]
+            else:
+                # Use actual values for the first prediction
+                future.loc[i, 'price_lag1'] = df_prophet['y'].iloc[-1]
+                future.loc[i, 'price_lag2'] = df_prophet['price_lag1'].iloc[-1]
+                future.loc[i, 'price_lag3'] = df_prophet['price_lag2'].iloc[-1]
+    
+    # Generate forecast
+    forecast = model.predict(future)
+    
+    return forecast, model
 
 # Function to load all csv files from data directory
 @st.cache_data(show_spinner=False)
@@ -97,7 +180,7 @@ with st.spinner("Loading commodity data..."):
 
 # Check if any data was loaded
 if not commodity_data:
-    st.warning("No commodity data found. Data files may be missing.")
+    st.warning("No commodity data found. Please make sure CSV files are in the data directory.")
     st.stop()
 
 # Sidebar for selecting commodities
@@ -169,7 +252,7 @@ if selected_commodity in commodity_data:
                       (df['Date'].dt.date <= end_date)]
     
     # Main content area - split into tabs
-    tab1, tab2, tab3 = st.tabs(["📈 Price Charts", "📊 Comparison", "🗃️ Data Explorer"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📈 Price Charts", "📊 Comparison", "🔮 Prediction", "🗃️ Data Explorer"])
     
     with tab1:
         st.header(f"{selected_commodity.capitalize()} Price Trends")
@@ -301,8 +384,164 @@ if selected_commodity in commodity_data:
                 st.warning("Please select at least one commodity to display")
         else:
             st.warning("Consolidated price data file not found.")
-            
+
     with tab3:
+        st.header(f"{selected_commodity.capitalize()} Price Prediction")
+        
+        # Create two columns for prediction settings
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Number of days to forecast
+            forecast_days = st.slider("Forecast days", min_value=7, max_value=90, value=30, step=7)
+            
+        with col2:
+            # Include uncertainty intervals
+            show_uncertainty = st.checkbox("Show uncertainty intervals", value=True)
+            # Include components
+            show_components = st.checkbox("Show forecast components", value=True)
+        
+        if st.button("Generate Forecast"):
+            with st.spinner("Generating forecast..."):
+                try:
+                    # Use a copy of the full dataset for forecasting (not just filtered data)
+                    forecast_df = df.copy()
+                    
+                    # Generate forecast
+                    forecast, model = generate_forecast(
+                        forecast_df, 
+                        periods=forecast_days,
+                        commodity_name=selected_commodity
+                    )
+                    
+                    # Create plot
+                    fig = go.Figure()
+                    
+                    # Add historical data
+                    fig.add_trace(go.Scatter(
+                        x=forecast_df['Date'],
+                        y=forecast_df['Price'],
+                        mode='lines',
+                        name='Historical',
+                        line=dict(color='blue')
+                    ))
+                    
+                    # Add prediction
+                    fig.add_trace(go.Scatter(
+                        x=forecast['ds'],
+                        y=forecast['yhat'],
+                        mode='lines',
+                        name='Forecast',
+                        line=dict(color='red')
+                    ))
+                    
+                    # Add prediction intervals if selected
+                    if show_uncertainty:
+                        fig.add_trace(go.Scatter(
+                            x=forecast['ds'],
+                            y=forecast['yhat_upper'],
+                            mode='lines',
+                            line=dict(width=0),
+                            showlegend=False
+                        ))
+                        
+                        fig.add_trace(go.Scatter(
+                            x=forecast['ds'],
+                            y=forecast['yhat_lower'],
+                            mode='lines',
+                            fill='tonexty',
+                            fillcolor='rgba(255, 0, 0, 0.1)',
+                            line=dict(width=0),
+                            name='Confidence Interval'
+                        ))
+                    
+                    fig.update_layout(
+                        title=f"{selected_commodity.capitalize()} Price Forecast",
+                        xaxis_title="Date",
+                        yaxis_title="Price",
+                        hovermode="x unified",
+                        template='plotly_white'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Show forecast components if selected
+                    if show_components:
+                        st.subheader("Forecast Components")
+                        try:
+                            # Make a copy of the forecast for component plotting
+                            forecast_comp = forecast.copy()
+                            
+                            # Plot trend
+                            trend_fig = px.line(
+                                forecast_comp, 
+                                x='ds', 
+                                y='trend',
+                                title="Trend Component",
+                                labels={'ds': 'Date', 'trend': 'Trend'},
+                                template='plotly_white'
+                            )
+                            st.plotly_chart(trend_fig, use_container_width=True)
+                            
+                            # Plot yearly seasonality if present
+                            if 'yearly' in forecast_comp.columns:
+                                yearly_fig = px.line(
+                                    forecast_comp, 
+                                    x=[d.dayofyear for d in forecast_comp['ds']], 
+                                    y='yearly',
+                                    title="Yearly Seasonality",
+                                    labels={'x': 'Day of Year', 'yearly': 'Effect'},
+                                    template='plotly_white'
+                                )
+                                st.plotly_chart(yearly_fig, use_container_width=True)
+                            
+                            # Plot weekly seasonality if present
+                            if 'weekly' in forecast_comp.columns:
+                                weekly_fig = px.line(
+                                    forecast_comp, 
+                                    x=[d.dayofweek for d in forecast_comp['ds']], 
+                                    y='weekly',
+                                    title="Weekly Seasonality",
+                                    labels={'x': 'Day of Week (0=Monday)', 'weekly': 'Effect'},
+                                    template='plotly_white'
+                                )
+                                st.plotly_chart(weekly_fig, use_container_width=True)
+                                
+                        except Exception as comp_error:
+                            st.error(f"Error plotting components: {str(comp_error)}")
+                    
+                    # Display forecast metrics
+                    st.subheader("Forecast Metrics")
+                    
+                    # Calculate mean absolute percentage error (MAPE) for historical data
+                    historical_dates = forecast_df['Date'].isin(forecast['ds'])
+                    actual = forecast_df.loc[historical_dates, 'Price'].values
+                    predicted = forecast.loc[forecast['ds'].isin(forecast_df['Date']), 'yhat'].values
+                    
+                    if len(actual) > 0 and len(predicted) > 0:
+                        # Calculate errors
+                        mape = 100 * np.mean(np.abs((actual - predicted) / actual))
+                        mae = np.mean(np.abs(actual - predicted))
+                        
+                        # Display metrics
+                        metrics_col1, metrics_col2 = st.columns(2)
+                        metrics_col1.metric("Mean Absolute Error (MAE)", f"${mae:.2f}")
+                        metrics_col2.metric("Mean Absolute Percentage Error (MAPE)", f"{mape:.2f}%")
+                    
+                    # Display future predictions table
+                    st.subheader("Forecast Values")
+                    future_forecast = forecast[forecast['ds'] > forecast_df['Date'].max()]
+                    future_forecast_display = future_forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].copy()
+                    future_forecast_display.columns = ['Date', 'Forecast', 'Lower Bound', 'Upper Bound']
+                    future_forecast_display = future_forecast_display.round(2)
+                    st.dataframe(future_forecast_display, use_container_width=True)
+                    
+                except Exception as e:
+                    st.error(f"Error generating forecast: {str(e)}")
+                    st.text(traceback.format_exc())
+                    st.info("Forecasting works best with daily data over longer periods. Try using a different timeframe or commodity.")
+            
+    with tab4:
         st.header(f"{selected_commodity.capitalize()} Data Explorer")
         
         # Show the data table
